@@ -50,6 +50,9 @@ resource "aws_security_group" "wordpress-db-client-SG" {
   name = "wordpress-db-client-SG"
 
   vpc_id = module.vpc.vpc_id
+  tags = {
+    Name = "WP DB Client SG"
+  }
 }
 
 resource "aws_security_group" "wordpress-db-SG" {
@@ -71,6 +74,9 @@ resource "aws_security_group" "wordpress-db-SG" {
       from_port = 0
       to_port = 0
       protocol = "-1"
+  }
+  tags = {
+    Name = "WP DB SG"
   }
 }
 ################################################################################
@@ -259,16 +265,17 @@ resource "aws_security_group" "wordpress-lb-SG" {
   ingress {
       from_port = 80
       to_port = 80
-      protocol  = "http"
+      protocol  = "tcp"
       cidr_blocks      = ["0.0.0.0/0"]
       ipv6_cidr_blocks = ["::/0"]
   }
   
   #Allow all outbounded traffic
   egress {
-      from_port = 0
-      to_port = 0
-      protocol = "-1"
+      from_port = 80
+      to_port = 80
+      protocol = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
   }
   tags = {
       Name = "WP Load Balancer SG"
@@ -277,7 +284,7 @@ resource "aws_security_group" "wordpress-lb-SG" {
 ################################################################################
 # Load Balancer
 ################################################################################
-module "alb" {
+/* module "alb" {
   source  = "terraform-aws-modules/alb/aws"
   version = "~> 6.0"
 
@@ -309,5 +316,101 @@ module "alb" {
   tags = {
     Terraform = "true"
     Environment = "dev"
+  }
+} */
+resource "aws_lb" "wordpress-loadbalancer" {
+
+  name               = "wordpress-loadbalancer"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.wordpress-lb-SG.id]
+  subnets            = module.vpc.public_subnets
+  tags = {
+      Terraform = "true"
+      Environment = "dev"
+    }
+}
+
+resource "aws_lb_listener" "wordpress-lb-listener" {
+  load_balancer_arn = aws_lb.wordpress-loadbalancer.arn
+  port              = 80
+  protocol          = "HTTP"
+  
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.wordpress-lb-target-group.arn
+  }
+}
+
+resource "aws_lb_target_group" "wordpress-lb-target-group" {
+  name     = "wordpress-lb-target-group"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = module.vpc.vpc_id
+  /* health_check {    
+    target              = "HTTP:80/"
+    healthy_threshold   = 3    
+    unhealthy_threshold = 10    
+    timeout             = 5    
+    interval            = 10    
+    port                = 80 
+  } */
+  tags = {
+      Terraform = "true"
+      Environment = "dev"
+    }
+}
+
+/*==================================
+Lab 6: Create a launch configuration
+====================================*/
+resource "aws_security_group" "wp-wordpress-SG" {
+  name = "wp-wordpress-SG"
+  description = "Allow HTTP connection from Load Balancer"
+  vpc_id = module.vpc.vpc_id
+
+  # Only lb in
+  ingress {
+    from_port = 80
+    to_port = 80
+    protocol = "tcp"
+  }
+
+  # Allow all outbound traffic
+  egress {
+    from_port = 0
+    to_port = 0
+    protocol = "-1"
+  }
+
+  tags = {
+    Name = "WP Wordpress SG" 
+  }
+}
+
+data "template_file" "user_data" {
+  template = file("${path.module}/user_data.tpl")
+  vars = {
+    EFS_MOUNT   = aws_efs_mount_target.wordpress-mount-targets[0].dns_name
+    DB_NAME     = aws_rds_cluster.wordpress-rds-cluster.database_name
+    DB_HOSTNAME = aws_rds_cluster.wordpress-rds-cluster.endpoint
+    DB_USERNAME = aws_rds_cluster.wordpress-rds-cluster.master_username
+    DB_PASSWORD = aws_rds_cluster.wordpress-rds-cluster.master_password
+    LB_HOSTNAME = aws_lb.wordpress-loadbalancer.dns_name
+  }
+}
+
+resource "aws_launch_configuration" "launch-conf" {
+  name_prefix = "launch-conf"
+  image_id = "ami-0eab41619a08cc289"
+  instance_type = "t2.small"
+  security_groups = [aws_security_group.wordpress-db-client-SG.id,
+                      aws_security_group.wordpress-db-SG.id,
+                      aws_security_group.wp-wordpress-SG.id, 
+                      aws_security_group.wordpress-cache-SG.id] 
+                                          
+  user_data = data.template_file.user_data.rendered
+  lifecycle {
+    create_before_destroy = true
   }
 }
